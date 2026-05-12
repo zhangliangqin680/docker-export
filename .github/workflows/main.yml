@@ -10,16 +10,10 @@ jobs:
     steps:
       - name: Pull Docker images
         run: |
-          docker pull node:20-bookworm
-          docker pull golang:1.26.1-bookworm
-          docker pull debian:bookworm-slim
           docker pull oven/bun:1
       
       - name: Export images
         run: |
-          docker save node:20-bookworm | gzip > node.tar.gz
-          docker save golang:1.26.1-bookworm | gzip > golang.tar.gz
-          docker save debian:bookworm-slim | gzip > debian.tar.gz
           docker save oven/bun:1 | gzip > bun.tar.gz
       
       - name: Upload artifacts
@@ -27,7 +21,4 @@ jobs:
         with:
           name: docker-images
           path: |
-            node.tar.gz
-            golang.tar.gz
-            debian.tar.gz
             bun.tar.gz
