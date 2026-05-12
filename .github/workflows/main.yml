@@ -1,16 +1,8 @@
-name: Generate Offline Packages
+name: Export node_modules
 
 on:
   workflow_dispatch:
     inputs:
-      include_bun:
-        description: '是否包含 Bun 镜像和依赖'
-        required: false
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
       node_version:
         description: 'Node.js 版本'
         required: false
@@ -23,135 +15,85 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    
+    timeout-minutes: 30
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
-      # 拉取 Docker 基础镜像
-      - name: Pull Docker base images
+
+      - name: Debug - Show directory structure
         run: |
-          echo "拉取 Docker 基础镜像..."
-          docker pull node:${{ github.event.inputs.node_version }}-bookworm
-          docker pull golang:1.26.1-bookworm
-          docker pull debian:bookworm-slim
+          echo "=== 当前目录 ==="
+          pwd
+          echo ""
+          echo "=== 根目录文件列表 ==="
+          ls -la
+          echo ""
+          echo "=== 查找 web 目录 ==="
+          find . -type d -name "web" 2>/dev/null
+          echo ""
+          echo "=== 查找 package.json ==="
+          find . -name "package.json" -type f 2>/dev/null
+
+      - name: Install dependencies for web/default
+        run: |
+          echo "安装 web/default 依赖..."
           
-          if [ "${{ github.event.inputs.include_bun }}" == "true" ]; then
-            docker pull oven/bun:1
+          # 如果 web/default 存在
+          if [ -d "web/default" ]; then
+            cd web/default
+            npm config set registry https://registry.npmmirror.com
+            npm install --legacy-peer-deps --ignore-scripts
+            cd ../..
+          else
+            echo "web/default 目录不存在，跳过"
           fi
-          
-          docker images | grep -E "node|golang|debian|bun"
-      
-      # 导出 Docker 镜像
-      - name: Export Docker images
+
+      - name: Install dependencies for web/classic
         run: |
-          echo "导出 Docker 镜像..."
-          docker save node:${{ github.event.inputs.node_version }}-bookworm | gzip > node.tar.gz
-          docker save golang:1.26.1-bookworm | gzip > golang.tar.gz
-          docker save debian:bookworm-slim | gzip > debian.tar.gz
+          echo "安装 web/classic 依赖..."
           
-          if [ "${{ github.event.inputs.include_bun }}" == "true" ]; then
-            docker save oven/bun:1 | gzip > bun.tar.gz
+          if [ -d "web/classic" ]; then
+            cd web/classic
+            npm config set registry https://registry.npmmirror.com
+            npm install --legacy-peer-deps --ignore-scripts
+            cd ../..
+          else
+            echo "web/classic 目录不存在，跳过"
           fi
-          
-          ls -lh *.tar.gz
-      
-      # 安装并打包 npm 依赖
-      - name: Install and pack npm dependencies
+
+      - name: Pack node_modules
         run: |
-          echo "安装 npm 依赖..."
+          echo "打包 node_modules..."
           
-          docker run --rm \
-            -v $(pwd):/app \
-            -w /app \
-            node:${{ github.event.inputs.node_version }}-bookworm \
-            bash -c "
-              npm config set registry https://registry.npmmirror.com
-              
-              if [ -d web/default ]; then
-                cd web/default
-                npm install --legacy-peer-deps --no-audit --no-fund --ignore-scripts
-                cd ../..
-              fi
-              
-              if [ -d web/classic ]; then
-                cd web/classic
-                npm install --legacy-peer-deps --no-audit --no-fund --ignore-scripts
-                cd ../..
-              fi
-            "
-          
-          if [ -d web/default/node_modules ]; then
+          if [ -d "web/default/node_modules" ]; then
             tar -czf node_modules_default.tar.gz -C web/default node_modules
             cp web/default/package-lock.json package-lock-default.json
+            echo "✅ node_modules_default.tar.gz 已生成"
+          else
+            echo "❌ web/default/node_modules 不存在"
           fi
           
-          if [ -d web/classic/node_modules ]; then
+          if [ -d "web/classic/node_modules" ]; then
             tar -czf node_modules_classic.tar.gz -C web/classic node_modules
             cp web/classic/package-lock.json package-lock-classic.json
+            echo "✅ node_modules_classic.tar.gz 已生成"
+          else
+            echo "❌ web/classic/node_modules 不存在"
           fi
-      
-      # 安装并打包 bun 依赖（可选）
-      - name: Install and pack bun dependencies
-        if: github.event.inputs.include_bun == 'true'
+
+      - name: List generated files
         run: |
-          echo "安装 Bun 依赖..."
-          
-          docker run --rm \
-            -v $(pwd):/app \
-            -w /app \
-            oven/bun:1 \
-            bash -c "
-              if [ -d web/default ]; then
-                cd web/default
-                bun install --force --no-cache --ignore-scripts
-                cd ../..
-              fi
-              
-              if [ -d web/classic ]; then
-                cd web/classic
-                bun install --force --no-cache --ignore-scripts
-                cd ../..
-              fi
-            "
-          
-          if [ -d web/default/node_modules ]; then
-            tar -czf bun_modules_default.tar.gz -C web/default node_modules
-            cp web/default/bun.lock bun-lock-default.json
-          fi
-          
-          if [ -d web/classic/node_modules ]; then
-            tar -czf bun_modules_classic.tar.gz -C web/classic node_modules
-            cp web/classic/bun.lock bun-lock-classic.json
-          fi
-      
-      # 生成部署脚本
-      - name: Generate deploy script
-        run: |
-          cat > deploy.sh << 'EOF'
-          #!/bin/bash
-          echo "=== 导入 Docker 基础镜像 ==="
-          gunzip -c node.tar.gz | docker load
-          gunzip -c golang.tar.gz | docker load
-          gunzip -c debian.tar.gz | docker load
-          if [ -f bun.tar.gz ]; then
-            gunzip -c bun.tar.gz | docker load
-          fi
-          echo "=== 镜像导入完成 ==="
-          docker images | grep -E "node|golang|debian|bun"
-          EOF
-          
-          chmod +x deploy.sh
-      
-      # 上传产物
+          echo "=== 生成的文件 ==="
+          ls -la *.tar.gz 2>/dev/null || echo "没有 tar.gz 文件"
+          ls -la *.json 2>/dev/null || echo "没有 json 文件"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: offline-packages
+          name: node-modules-packages
           compression-level: 0
           retention-days: 7
           path: |
             *.tar.gz
             *.json
-            deploy.sh
