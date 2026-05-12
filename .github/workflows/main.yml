@@ -6,7 +6,7 @@ on:
       include_bun:
         description: '是否包含 Bun 镜像'
         required: false
-        default: 'true'
+        default: 'false'
         type: choice
         options:
           - 'true'
@@ -24,120 +24,82 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
       
-      # ============================================
-      # 1. 拉取所有需要的 Docker 基础镜像
-      # ============================================
+      # 拉取所有需要的 Docker 基础镜像
       - name: Pull Docker base images
         run: |
           echo "拉取 Docker 基础镜像..."
-          docker pull node:20-bookworm
+          docker pull node:22-bookworm
           docker pull golang:1.26.1-bookworm
           docker pull debian:bookworm-slim
-          docker pull oven/bun:1
+          
+          if [ "${{ github.event.inputs.include_bun }}" == "true" ]; then
+            docker pull oven/bun:1
+          fi
           
           echo "已拉取的镜像列表："
           docker images | grep -E "node|golang|debian|bun"
       
-      # ============================================
-      # 2. 使用 Node.js 安装前端依赖（npm 版本）
-      # ============================================
+      # 使用 Node.js 22 安装前端依赖
       - name: Install npm dependencies
         run: |
-          echo "安装 npm 依赖..."
+          echo "安装 npm 依赖 (Node.js 22)..."
           
-          # 使用容器安装 default 前端依赖
           docker run --rm \
             -v $(pwd):/app \
             -w /app \
-            node:20-bookworm \
+            node:22-bookworm \
             bash -c "
               npm config set registry https://registry.npmmirror.com
-              cd web/default
-              npm install --legacy-peer-deps --no-audit --no-fund
+              cd web/default && npm install --legacy-peer-deps --no-audit --no-fund --ignore-scripts
+              cd ../classic && npm install --legacy-peer-deps --no-audit --no-fund --ignore-scripts
             "
           
-          # 使用容器安装 classic 前端依赖
-          docker run --rm \
-            -v $(pwd):/app \
-            -w /app \
-            node:20-bookworm \
-            bash -c "
-              npm config set registry https://registry.npmmirror.com
-              cd web/classic
-              npm install --legacy-peer-deps --no-audit --no-fund
-            "
-          
-          # 打包 node_modules
           echo "打包 node_modules..."
           tar -czf node_modules_default.tar.gz -C web/default node_modules
           tar -czf node_modules_classic.tar.gz -C web/classic node_modules
           
-          # 备份 package-lock.json
           cp web/default/package-lock.json package-lock-default.json
           cp web/classic/package-lock.json package-lock-classic.json
       
-      # ============================================
-      # 3. 使用 Bun 安装前端依赖（如果需要）
-      # ============================================
-      - name: Install bun dependencies (optional)
+      # 使用 Bun 安装前端依赖（可选）
+      - name: Install bun dependencies
         if: github.event.inputs.include_bun == 'true'
         run: |
           echo "安装 Bun 依赖..."
           
-          # 安装 default
-          docker run --rm \
-            -v $(pwd):/app \
-            -w /app \
-            oven/bun:1 \
-            bash -c "
-              cd web/default
-              bun install --force --no-cache --ignore-scripts
-            "
+          docker run --rm -v $(pwd):/app -w /app oven/bun:1 bash -c "
+            cd web/default && bun install --force --no-cache --ignore-scripts
+            cd ../classic && bun install --force --no-cache --ignore-scripts
+          "
           
-          # 安装 classic
-          docker run --rm \
-            -v $(pwd):/app \
-            -w /app \
-            oven/bun:1 \
-            bash -c "
-              cd web/classic
-              bun install --force --no-cache --ignore-scripts
-            "
-          
-          # 打包 bun 的 node_modules
           tar -czf bun_modules_default.tar.gz -C web/default node_modules 2>/dev/null || true
           tar -czf bun_modules_classic.tar.gz -C web/classic node_modules 2>/dev/null || true
-          
-          # 备份 bun.lock
           cp web/default/bun.lock bun-lock-default.json 2>/dev/null || true
           cp web/classic/bun.lock bun-lock-classic.json 2>/dev/null || true
       
-      # ============================================
-      # 4. 导出所有 Docker 镜像为 tar 包
-      # ============================================
+      # 导出 Docker 镜像
       - name: Export Docker images
         run: |
           echo "导出 Docker 镜像..."
-          docker save node:20-bookworm | gzip > node.tar.gz
+          docker save node:22-bookworm | gzip > node22.tar.gz
           docker save golang:1.26.1-bookworm | gzip > golang.tar.gz
           docker save debian:bookworm-slim | gzip > debian.tar.gz
-          docker save oven/bun:1 | gzip > bun.tar.gz
           
-          echo "导出完成，文件列表："
+          if [ "${{ github.event.inputs.include_bun }}" == "true" ]; then
+            docker save oven/bun:1 | gzip > bun.tar.gz
+          fi
+          
           ls -lh *.tar.gz
       
-      # ============================================
-      # 5. 构建最终的项目镜像（可选）
-      # ============================================
+      # 构建最终的项目镜像
       - name: Build final project image
         run: |
           echo "构建项目镜像..."
+          sed -i 's/node:20-bookworm/node:22-bookworm/g' Dockerfile 2>/dev/null || true
           docker build -t prism-api:latest .
           docker save prism-api:latest | gzip > prism-api-full.tar.gz
       
-      # ============================================
-      # 6. 上传所有产物
-      # ============================================
+      # 上传所有产物
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -147,31 +109,3 @@ jobs:
           path: |
             *.tar.gz
             *.json
-            README.md
-      
-      # ============================================
-      # 7. 生成部署说明
-      # ============================================
-      - name: Generate deployment guide
-        run: |
-          cat > README.md << 'EOF'
-          # 离线部署包使用说明
-          
-          ## 文件列表
-          - `node.tar.gz` - Node.js 基础镜像
-          - `golang.tar.gz` - Golang 基础镜像
-          - `debian.tar.gz` - Debian 基础镜像
-          - `bun.tar.gz` - Bun 基础镜像（可选）
-          - `prism-api-full.tar.gz` - 完整项目镜像（可直接运行）
-          - `node_modules_default.tar.gz` - default 前端依赖
-          - `node_modules_classic.tar.gz` - classic 前端依赖
-          - `package-lock-*.json` - 锁定文件
-          
-          ## 部署步骤
-          
-          ### 1. 上传所有 tar.gz 文件到服务器
-          ### 2. 导入基础镜像
-          ```bash
-          gunzip -c node.tar.gz | docker load
-          gunzip -c golang.tar.gz | docker load
-          gunzip -c debian.tar.gz | docker load
