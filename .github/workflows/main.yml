@@ -1,30 +1,32 @@
-name: Debug Repo Structure
+name: Mirror base images
 
 on:
   workflow_dispatch:
 
 jobs:
-  debug:
+  export:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Show full structure
+      - name: Pull and save images
         run: |
-          echo "=== 当前目录 ==="
-          pwd
-          echo ""
-          echo "=== 根目录所有文件 ==="
-          ls -la
-          echo ""
-          echo "=== 查找所有目录（深度3） ==="
-          find . -maxdepth 3 -type d 2>/dev/null
-          echo ""
-          echo "=== 查找所有 package.json ==="
-          find . -name "package.json" -type f 2>/dev/null
-          echo ""
-          echo "=== 查找 web 目录 ==="
-          find . -name "web" -type d 2>/dev/null
-          echo ""
-          echo "=== 打印仓库根目录内容 ==="
-          ls -laR | head -100
+          set -euo pipefail
+          mkdir -p images
+
+          docker pull ghcr.io/posthog/rust-node-container:bookworm_rust_1.91-node_24.13.0
+          docker save -o images/rust-node-container_bookworm_rust_1.91-node_24.13.0.tar \
+            ghcr.io/posthog/rust-node-container:bookworm_rust_1.91-node_24.13.0
+
+          docker pull ghcr.io/astral-sh/uv:0.11.14
+          docker save -o images/uv_0.11.14.tar \
+            ghcr.io/astral-sh/uv:0.11.14
+
+          ls -lh images/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: base-images
+          path: images/*.tar
+          retention-days: 3
