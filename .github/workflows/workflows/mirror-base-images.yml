@@ -1,0 +1,32 @@
+name: Mirror base images
+
+on:
+  workflow_dispatch:
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Pull and save images
+        run: |
+          set -euo pipefail
+          mkdir -p images
+
+          docker pull ghcr.io/posthog/rust-node-container:bookworm_rust_1.91-node_24.13.0
+          docker save -o images/rust-node-container_bookworm_rust_1.91-node_24.13.0.tar \
+            ghcr.io/posthog/rust-node-container:bookworm_rust_1.91-node_24.13.0
+
+          docker pull ghcr.io/astral-sh/uv:0.11.14
+          docker save -o images/uv_0.11.14.tar \
+            ghcr.io/astral-sh/uv:0.11.14
+
+          ls -lh images/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: base-images
+          path: images/*.tar
+          retention-days: 3
