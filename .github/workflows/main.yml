@@ -1,17 +1,43 @@
-# Copy to any GitHub repo as .github/workflows/fetch-native-prebuilds.yml
-# (e.g. zhangliangqin680/docker-export), then Actions → Run workflow → download artifact.
+# Copy to any GitHub repo as .github/workflows/export-base-images.yml
+# (e.g. zhangliangqin680/docker-export). Manual run → download artifact →
+# unpack on internal host → bash push-base-images.sh
 #
-# After download, unpack onto the Jenkins build host into the PostHog checkout:
-#   vendor/native-prebuilds/linux-x64-137.br
-#   vendor/native-prebuilds/zstd-v7.0.0-napi-v9-linux-x64.tar.gz
+# Artifact contents (flat):
+#   rust-node-container_bookworm_rust_1.91-node_24.13.0.tar
+#   uv_0.11.14.tar
+#   linux-x64-137.br
+#   zstd-v7.0.0-napi-v9-linux-x64.tar.gz
 #
-# Dockerfile.node COPYs that directory and skips GitHub during pnpm install.
+# On internal host:
+#   unzip base-images-*.zip -d /root/baseImage
+#   ASSET_DIR=/root/baseImage REGISTRY_USER=... REGISTRY_PASSWORD=... \
+#     bash push-base-images.sh
 
-name: Fetch native prebuilds
+name: Export PostHog base images
 
 on:
   workflow_dispatch:
     inputs:
+      include_rust_node:
+        description: Pull + save rust-node-container image
+        type: boolean
+        default: true
+      include_uv:
+        description: Pull + save uv image
+        type: boolean
+        default: true
+      include_native:
+        description: Download re2 + zstd GitHub Release prebuilds
+        type: boolean
+        default: true
+      rust_node_image:
+        description: rust-node upstream image
+        required: true
+        default: 'ghcr.io/posthog/rust-node-container:bookworm_rust_1.91-node_24.13.0'
+      uv_image:
+        description: uv upstream image
+        required: true
+        default: 'ghcr.io/astral-sh/uv:0.11.14'
       re2_version:
         description: re2 npm / GitHub release version
         required: true
@@ -25,7 +51,7 @@ on:
         required: true
         default: '7.0.0'
       arch:
-        description: linux arch for prebuilds (x64 or arm64)
+        description: linux arch for native prebuilds (x64 or arm64)
         required: true
         default: 'x64'
         type: choice
@@ -34,12 +60,43 @@ on:
           - arm64
 
 jobs:
-  fetch:
+  export:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 120
 
     steps:
-      - name: Download prebuilds
+      - name: Prepare output dir
+        run: mkdir -p out && ls -la
+
+      - name: Pull and save rust-node-container
+        if: ${{ inputs.include_rust_node }}
+        env:
+          IMAGE: ${{ inputs.rust_node_image }}
+        run: |
+          set -euo pipefail
+          echo "PULL ${IMAGE}"
+          docker pull "${IMAGE}"
+          # Filename matches scripts/push-base-images.sh defaults
+          TAG="${IMAGE##*:}"
+          OUT="out/rust-node-container_${TAG}.tar"
+          docker save -o "${OUT}" "${IMAGE}"
+          ls -lh "${OUT}"
+
+      - name: Pull and save uv
+        if: ${{ inputs.include_uv }}
+        env:
+          IMAGE: ${{ inputs.uv_image }}
+        run: |
+          set -euo pipefail
+          echo "PULL ${IMAGE}"
+          docker pull "${IMAGE}"
+          TAG="${IMAGE##*:}"
+          OUT="out/uv_${TAG}.tar"
+          docker save -o "${OUT}" "${IMAGE}"
+          ls -lh "${OUT}"
+
+      - name: Download native prebuilds (re2 + zstd)
+        if: ${{ inputs.include_native }}
         env:
           RE2_VERSION: ${{ inputs.re2_version }}
           NODE_ABI: ${{ inputs.node_abi }}
@@ -47,27 +104,32 @@ jobs:
           ARCH: ${{ inputs.arch }}
         run: |
           set -euo pipefail
-          mkdir -p prebuilds
-
           RE2_FILE="linux-${ARCH}-${NODE_ABI}.br"
           RE2_URL="https://github.com/uhop/node-re2/releases/download/${RE2_VERSION}/${RE2_FILE}"
           echo "GET ${RE2_URL}"
-          curl -fL --retry 5 --retry-delay 2 -o "prebuilds/${RE2_FILE}" "${RE2_URL}"
+          curl -fL --retry 5 --retry-delay 2 -o "out/${RE2_FILE}" "${RE2_URL}"
 
           ZSTD_FILE="zstd-v${ZSTD_VERSION}-napi-v9-linux-${ARCH}.tar.gz"
           ZSTD_URL="https://github.com/mongodb-js/zstd/releases/download/v${ZSTD_VERSION}/${ZSTD_FILE}"
           echo "GET ${ZSTD_URL}"
-          curl -fL --retry 5 --retry-delay 2 -o "prebuilds/${ZSTD_FILE}" "${ZSTD_URL}"
+          curl -fL --retry 5 --retry-delay 2 -o "out/${ZSTD_FILE}" "${ZSTD_URL}"
 
-          ls -lh prebuilds/
-          # sanity: brotli header is not required; just non-empty
-          test -s "prebuilds/${RE2_FILE}"
-          test -s "prebuilds/${ZSTD_FILE}"
+          test -s "out/${RE2_FILE}"
+          test -s "out/${ZSTD_FILE}"
+          ls -lh out/
+
+      - name: Summarize
+        run: |
+          set -euo pipefail
+          echo "=== out/ ==="
+          ls -lh out/
+          du -sh out/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: native-prebuilds-linux-${{ inputs.arch }}-abi${{ inputs.node_abi }}
-          path: prebuilds/
+          name: posthog-base-images
+          path: out/
           if-no-files-found: error
           retention-days: 14
+          compression-level: 0
