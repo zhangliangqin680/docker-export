@@ -1,32 +1,73 @@
-name: Mirror base images
+# Copy to any GitHub repo as .github/workflows/fetch-native-prebuilds.yml
+# (e.g. zhangliangqin680/docker-export), then Actions → Run workflow → download artifact.
+#
+# After download, unpack onto the Jenkins build host into the PostHog checkout:
+#   vendor/native-prebuilds/linux-x64-137.br
+#   vendor/native-prebuilds/zstd-v7.0.0-napi-v9-linux-x64.tar.gz
+#
+# Dockerfile.node COPYs that directory and skips GitHub during pnpm install.
+
+name: Fetch native prebuilds
 
 on:
   workflow_dispatch:
+    inputs:
+      re2_version:
+        description: re2 npm / GitHub release version
+        required: true
+        default: '1.22.1'
+      node_abi:
+        description: Node MODULES_ABI (Node 24 = 137)
+        required: true
+        default: '137'
+      zstd_version:
+        description: '@mongodb-js/zstd release tag (without v)'
+        required: true
+        default: '7.0.0'
+      arch:
+        description: linux arch for prebuilds (x64 or arm64)
+        required: true
+        default: 'x64'
+        type: choice
+        options:
+          - x64
+          - arm64
 
 jobs:
-  export:
+  fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 15
 
     steps:
-      - name: Pull and save images
+      - name: Download prebuilds
+        env:
+          RE2_VERSION: ${{ inputs.re2_version }}
+          NODE_ABI: ${{ inputs.node_abi }}
+          ZSTD_VERSION: ${{ inputs.zstd_version }}
+          ARCH: ${{ inputs.arch }}
         run: |
           set -euo pipefail
-          mkdir -p images
+          mkdir -p prebuilds
 
-          docker pull ghcr.io/posthog/rust-node-container:bookworm_rust_1.91-node_24.13.0
-          docker save -o images/rust-node-container_bookworm_rust_1.91-node_24.13.0.tar \
-            ghcr.io/posthog/rust-node-container:bookworm_rust_1.91-node_24.13.0
+          RE2_FILE="linux-${ARCH}-${NODE_ABI}.br"
+          RE2_URL="https://github.com/uhop/node-re2/releases/download/${RE2_VERSION}/${RE2_FILE}"
+          echo "GET ${RE2_URL}"
+          curl -fL --retry 5 --retry-delay 2 -o "prebuilds/${RE2_FILE}" "${RE2_URL}"
 
-          docker pull ghcr.io/astral-sh/uv:0.11.14
-          docker save -o images/uv_0.11.14.tar \
-            ghcr.io/astral-sh/uv:0.11.14
+          ZSTD_FILE="zstd-v${ZSTD_VERSION}-napi-v9-linux-${ARCH}.tar.gz"
+          ZSTD_URL="https://github.com/mongodb-js/zstd/releases/download/v${ZSTD_VERSION}/${ZSTD_FILE}"
+          echo "GET ${ZSTD_URL}"
+          curl -fL --retry 5 --retry-delay 2 -o "prebuilds/${ZSTD_FILE}" "${ZSTD_URL}"
 
-          ls -lh images/
+          ls -lh prebuilds/
+          # sanity: brotli header is not required; just non-empty
+          test -s "prebuilds/${RE2_FILE}"
+          test -s "prebuilds/${ZSTD_FILE}"
 
-      - name: Upload artifacts
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: base-images
-          path: images/*.tar
-          retention-days: 3
+          name: native-prebuilds-linux-${{ inputs.arch }}-abi${{ inputs.node_abi }}
+          path: prebuilds/
+          if-no-files-found: error
+          retention-days: 14
