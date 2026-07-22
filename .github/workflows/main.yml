@@ -1,135 +1,57 @@
-# Copy to any GitHub repo as .github/workflows/export-base-images.yml
-# (e.g. zhangliangqin680/docker-export). Manual run → download artifact →
-# unpack on internal host → bash push-base-images.sh
-#
-# Artifact contents (flat):
-#   rust-node-container_bookworm_rust_1.91-node_24.13.0.tar
-#   uv_0.11.14.tar
-#   linux-x64-137.br
-#   zstd-v7.0.0-napi-v9-linux-x64.tar.gz
-#
-# On internal host:
-#   unzip base-images-*.zip -d /root/baseImage
-#   ASSET_DIR=/root/baseImage REGISTRY_USER=... REGISTRY_PASSWORD=... \
-#     bash push-base-images.sh
-
-name: Export PostHog base images
+# Pull PostHog capture from ghcr.io (reachable from GitHub runners),
+# upload a docker-save artifact for air-gapped / China deploy hosts that
+# cannot pull ghcr directly. Load on the host with:
+#   gh run download <run-id> -n posthog-capture -D /tmp
+#   gunzip -c /tmp/posthog-capture-*.tar.gz | docker load
+#   docker tag ghcr.io/posthog/posthog/capture:<tag> \
+#     172.16.0.67:8881/deeprouter/posthog-capture:<tag>
+#   docker push 172.16.0.67:8881/deeprouter/posthog-capture:<tag>
+name: Mirror capture image
 
 on:
   workflow_dispatch:
     inputs:
-      include_rust_node:
-        description: Pull + save rust-node-container image
-        type: boolean
-        default: true
-      include_uv:
-        description: Pull + save uv image
-        type: boolean
-        default: true
-      include_native:
-        description: Download re2 + zstd GitHub Release prebuilds
-        type: boolean
-        default: true
-      rust_node_image:
-        description: rust-node upstream image
+      source_tag:
+        description: 'ghcr.io/posthog/posthog/capture tag'
         required: true
-        default: 'ghcr.io/posthog/rust-node-container:bookworm_rust_1.91-node_24.13.0'
-      uv_image:
-        description: uv upstream image
-        required: true
-        default: 'ghcr.io/astral-sh/uv:0.11.14'
-      re2_version:
-        description: re2 npm / GitHub release version
-        required: true
-        default: '1.22.1'
-      node_abi:
-        description: Node MODULES_ABI (Node 24 = 137)
-        required: true
-        default: '137'
-      zstd_version:
-        description: '@mongodb-js/zstd release tag (without v)'
-        required: true
-        default: '7.0.0'
-      arch:
-        description: linux arch for native prebuilds (x64 or arm64)
-        required: true
-        default: 'x64'
-        type: choice
-        options:
-          - x64
-          - arm64
+        default: 'master'
+        type: string
+
+concurrency:
+  group: mirror-capture-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  export:
+  pull-and-pack:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-
+    timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
-      - name: Prepare output dir
-        run: mkdir -p out && ls -la
-
-      - name: Pull and save rust-node-container
-        if: ${{ inputs.include_rust_node }}
-        env:
-          IMAGE: ${{ inputs.rust_node_image }}
+      - name: Pull capture from ghcr
         run: |
           set -euo pipefail
-          echo "PULL ${IMAGE}"
-          docker pull "${IMAGE}"
-          # Filename matches scripts/push-base-images.sh defaults
-          TAG="${IMAGE##*:}"
-          OUT="out/rust-node-container_${TAG}.tar"
-          docker save -o "${OUT}" "${IMAGE}"
+          SRC="ghcr.io/posthog/posthog/capture:${{ inputs.source_tag }}"
+          echo "Pulling ${SRC}"
+          docker pull "${SRC}"
+          docker image inspect "${SRC}" --format '{{.Id}} {{.Size}}'
+
+      - name: Save and compress
+        run: |
+          set -euo pipefail
+          SRC="ghcr.io/posthog/posthog/capture:${{ inputs.source_tag }}"
+          OUT="posthog-capture-${{ inputs.source_tag }}.tar.gz"
+          # sanitize filename (tags can contain /)
+          OUT="$(echo "${OUT}" | tr '/:' '__')"
+          echo "OUT=${OUT}" >> "$GITHUB_ENV"
+          docker save "${SRC}" | gzip -1 > "${OUT}"
           ls -lh "${OUT}"
-
-      - name: Pull and save uv
-        if: ${{ inputs.include_uv }}
-        env:
-          IMAGE: ${{ inputs.uv_image }}
-        run: |
-          set -euo pipefail
-          echo "PULL ${IMAGE}"
-          docker pull "${IMAGE}"
-          TAG="${IMAGE##*:}"
-          OUT="out/uv_${TAG}.tar"
-          docker save -o "${OUT}" "${IMAGE}"
-          ls -lh "${OUT}"
-
-      - name: Download native prebuilds (re2 + zstd)
-        if: ${{ inputs.include_native }}
-        env:
-          RE2_VERSION: ${{ inputs.re2_version }}
-          NODE_ABI: ${{ inputs.node_abi }}
-          ZSTD_VERSION: ${{ inputs.zstd_version }}
-          ARCH: ${{ inputs.arch }}
-        run: |
-          set -euo pipefail
-          RE2_FILE="linux-${ARCH}-${NODE_ABI}.br"
-          RE2_URL="https://github.com/uhop/node-re2/releases/download/${RE2_VERSION}/${RE2_FILE}"
-          echo "GET ${RE2_URL}"
-          curl -fL --retry 5 --retry-delay 2 -o "out/${RE2_FILE}" "${RE2_URL}"
-
-          ZSTD_FILE="zstd-v${ZSTD_VERSION}-napi-v9-linux-${ARCH}.tar.gz"
-          ZSTD_URL="https://github.com/mongodb-js/zstd/releases/download/v${ZSTD_VERSION}/${ZSTD_FILE}"
-          echo "GET ${ZSTD_URL}"
-          curl -fL --retry 5 --retry-delay 2 -o "out/${ZSTD_FILE}" "${ZSTD_URL}"
-
-          test -s "out/${RE2_FILE}"
-          test -s "out/${ZSTD_FILE}"
-          ls -lh out/
-
-      - name: Summarize
-        run: |
-          set -euo pipefail
-          echo "=== out/ ==="
-          ls -lh out/
-          du -sh out/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: posthog-base-images
-          path: out/
+          name: posthog-capture
+          path: ${{ env.OUT }}
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
           compression-level: 0
